@@ -601,6 +601,7 @@ auto expand_raw_string_literal(
 //  current_comment         the current partial comment
 //  current_comment_start   the current comment's start position
 //  tokens                  the token list to add to
+//  preprocs                the preproc token list to add to
 //  comments                the comment token list to add to
 //  errors                  the error message list to use for reporting problems
 //  raw_string_multiline    the current optional raw_string state
@@ -622,6 +623,7 @@ auto lex_line(
     std::string&               current_comment,
     source_position&           current_comment_start,
     std::vector<token>&        tokens,
+    std::vector<preproc>&      preprocs,
     std::vector<comment>&      comments,
     std::vector<error_entry>&  errors,
     std::optional<raw_string>& raw_string_multiline
@@ -1325,6 +1327,15 @@ auto lex_line(
 
             //      /* and // comment starts
             //G     '/=' '/'
+            break;case '#': {
+                    preprocs.push_back({
+                        {lineno, i},
+                        {lineno, _as<colno_t>(std::ssize(line))},
+                        line.substr(i)
+                        });
+                    goto END;
+                }
+
             break;case '/':
                 if (peek1 == '*') {
                     current_comment = "/*";
@@ -1932,6 +1943,8 @@ class tokens
     //  All non-comment source tokens go here, which will be parsed in the parser
     std::map<lineno_t, std::vector<token>> grammar_map;
 
+    std::vector<preproc> preprocs;
+
     //  All comment source tokens go here, which are applied in the lexer
     //
     //  We could put all the tokens in the same map, but that would mean the
@@ -2007,7 +2020,7 @@ public:
                 lex_line(
                     line->text, lineno,
                     in_comment, current_comment, current_comment_start,
-                    entry, comments, errors,
+                    entry, preprocs, comments, errors,
                     raw_string_multiline
                 );
 
@@ -2050,6 +2063,16 @@ public:
 
 
     //-----------------------------------------------------------------------
+    //  get_preprocs: Access the preprocessor list
+    //
+    auto get_preprocs() const
+        -> auto const&
+    {
+        return preprocs;
+    }
+
+
+    //-----------------------------------------------------------------------
     //  get_comments: Access the comment list
     //
     auto get_comments() const
@@ -2068,6 +2091,20 @@ public:
         return generated_tokens;
     }
 
+    //-----------------------------------------------------------------------
+    //  num_unprinted_preprocs: The number of not-yet-printed preprocs
+    //
+    auto num_unprinted_preprocs()
+        -> int
+    {
+        auto ret = 0;
+        for (auto const& c : preprocs) {
+            if (!c.dbg_was_printed) {
+                ++ret;
+            }
+        }
+        return ret;
+    }
 
     //-----------------------------------------------------------------------
     //  num_unprinted_comments: The number of not-yet-printed comments
@@ -2099,6 +2136,14 @@ public:
                     << _as<std::string>(token.type()) << "\n";
             }
 
+        }
+
+        o << "--- Preprocs\n";
+        for (auto const& [start, end, text, dbg_ignore] : preprocs) {
+            o << "    "
+              << "(" << start.lineno << "," << start.colno << ")"
+              << "-(" << end.lineno << "," << end.colno << ")"
+              << " " << text << "\n";
         }
 
         o << "--- Comments\n";

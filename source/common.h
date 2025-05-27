@@ -121,6 +121,16 @@ struct source_position
     }
 };
 
+struct preproc
+{
+    source_position start;
+    source_position end;
+    std::string     text;
+
+    mutable bool    dbg_was_printed = false;
+};
+
+
 struct comment
 {
     enum class comment_kind : u8 { line_comment = 0, stream_comment };

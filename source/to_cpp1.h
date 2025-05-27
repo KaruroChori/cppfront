@@ -203,6 +203,7 @@ private:
     std::ostream*               out             = {}; // will point to out_file or cout
     std::string                 cpp2_filename   = {};
     std::string                 cpp1_filename   = {};
+    std::vector<preproc> const* ppreprocs       = {}; // Cpp2 preprocessor data
     std::vector<comment> const* pcomments       = {}; // Cpp2 comments data
     source const*               psource         = {};
     parser const*               pparser         = {};
@@ -210,6 +211,7 @@ private:
     source_position curr_pos                    = {}; // current (line,col) in output
     lineno_t        generated_pos_line          = {}; // current line in generated output
     int             last_line_indentation       = {};
+    int             next_preproc                = 0;  // index of the next preproc not yet printed
     int             next_comment                = 0;  // index of the next comment not yet printed
     bool            last_was_empty              = false;
     int             empty_lines_suppressed      = 0;
@@ -255,6 +257,7 @@ private:
         break;default                         : assert(false && "ICE: invalid lowering phase");
         }
         curr_pos     = {};
+        next_preproc = 0;   // start over with the preprocs
         next_comment = 0;   // start over with the comments
     }
 
@@ -410,6 +413,21 @@ private:
 
     //  Catch up with comment/blank lines
     //
+    auto print_preproc(preproc const& c)
+        -> void
+    {
+        //  For a line comment, start it at the right indentation and print it
+        //  with a newline end
+        print( pad( c.start.colno - curr_pos.colno + 1 ) );
+        print( c.text );
+        assert( c.text.find('\n') == c.text.npos ); // we shouldn't have newlines
+        print("\n");
+     
+        c.dbg_was_printed = true;
+    }
+
+    //  Catch up with comment/blank lines
+    //
     auto print_comment(comment const& c)
         -> void
     {
@@ -431,6 +449,62 @@ private:
 
         c.dbg_was_printed = true;
     }
+
+    auto flush_preprocs( source_position pos, bool print_remaining_preprocs = false )
+        -> void
+    {
+        if (!ppreprocs) {
+            return;
+        }
+
+        //  For convenience
+        auto& preprocs = *ppreprocs;
+
+        //  Add unprinted preprocs and blank lines as needed to catch up vertically
+        //
+        while (print_remaining_preprocs ? (next_preproc < std::ssize(preprocs)) : (curr_pos.lineno < pos.lineno))
+        {
+            //  If a preproc goes on this line, print it
+            if (
+                next_preproc < std::ssize(preprocs)
+                && preprocs[next_preproc].start.lineno <= curr_pos.lineno
+                )
+            {
+                //  Emit non-function body preprocs in phase1_type_defs_func_decls,
+                //  and emit function body preprocs in phase2_func_defs
+                assert(pparser);
+                if (
+                    (
+                        phase == phase1_type_defs_func_decls
+                        && !pparser->is_within_function_body( preprocs[next_preproc].start.lineno )
+                        )
+                    ||
+                    (
+                        phase == phase2_func_defs
+                        && pparser->is_within_function_body( preprocs[next_preproc].start.lineno )
+                        )
+                    )
+                {
+                    print_preproc( preprocs[next_preproc] );
+                    if (!print_remaining_preprocs) {
+                        assert(curr_pos.lineno <= pos.lineno);  // we shouldn't have overshot
+                    }
+                }
+
+                ++next_preproc;
+            }
+
+            //  Otherwise, just print a blank line
+            else {
+                print("\n");
+            }
+        }
+        // And catch up.
+        while (curr_pos.lineno < pos.lineno) {
+            print("\n");
+        }
+    }
+
 
     auto flush_comments( source_position pos, bool print_remaining_comments = false )
         -> void
@@ -487,6 +561,15 @@ private:
         }
     }
 
+    auto print_unprinted_preprocs()
+    {
+        for (auto const& c : *ppreprocs) {
+            if (!c.dbg_was_printed) {
+                print_preproc(c);
+            }
+        }
+    }
+
     auto print_unprinted_comments()
     {
         for (auto const& c : *pcomments) {
@@ -514,6 +597,7 @@ private:
         //  Otherwise, we need to apply our usual alignment logic
 
         //  Catch up with displaying comments
+        flush_preprocs( pos );
         flush_comments( pos );
 
         //  If we're not on the right line
@@ -587,7 +671,7 @@ public:
     //-----------------------------------------------------------------------
     //  Finalize phase
     //
-    auto finalize_phase(bool print_remaining_comments = false)
+    auto finalize_phase(bool print_remaining_preprocs = false, bool print_remaining_comments = false)
     {
         if (
             is_open()
@@ -595,7 +679,12 @@ public:
             && psource->has_cpp2()
             )
         {
+            flush_preprocs( {curr_pos.lineno+1, 1}, print_remaining_preprocs );
             flush_comments( {curr_pos.lineno+1, 1}, print_remaining_comments );
+
+            if (print_remaining_preprocs) {
+                print_unprinted_preprocs();
+            }
 
             if (print_remaining_comments) {
                 print_unprinted_comments();
@@ -619,6 +708,7 @@ public:
     auto open(
         std::string const&          cpp2_filename_,
         std::string const&          cpp1_filename_,
+        std::vector<preproc> const& preprocs,
         std::vector<comment> const& comments,
         cpp2::source const&         source,
         cpp2::parser const&         parser
@@ -630,6 +720,7 @@ public:
             cpp2_filename_;
         assert(
             !is_open()
+            && !ppreprocs
             && !pcomments
             && "ICE: tried to call .open twice"
         );
@@ -641,6 +732,7 @@ public:
             out_file.open(cpp1_filename);
             out = &out_file;
         }
+        ppreprocs = &preprocs;
         pcomments = &comments;
         psource   = &source;
         pparser   = &parser;
@@ -662,6 +754,10 @@ public:
         -> bool
     {
         if (out) {
+            assert(
+                ppreprocs
+                && "ICE: if is_open, ppreprocs should also be set"
+            );
             assert(
                 pcomments
                 && "ICE: if is_open, pcomments should also be set"
@@ -1282,6 +1378,7 @@ public:
         printer.open(
             sourcefile,
             cpp1_filename,
+            tokens.get_preprocs(),
             tokens.get_comments(),
             source,
             parser
@@ -1600,9 +1697,13 @@ public:
             printer.print_extra( "\n#endif" );
         }
 
-        printer.finalize_phase( true );
+        printer.finalize_phase( true, true );
 
         //  Finally, some debug checks
+        assert(
+            (!errors.empty() || tokens.num_unprinted_preprocs() == 0)
+            && "ICE: not all preprocs were printed"
+        );
         assert(
             (!errors.empty() || tokens.num_unprinted_comments() == 0)
             && "ICE: not all comments were printed"
